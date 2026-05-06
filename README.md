@@ -76,8 +76,8 @@ domain → subfinder → subdomains → httpx → live hosts → naabu → ports
 
 ```bash
 # Clone the repository
-git clone https://github.com/foxrecon/foxrecon.git
-cd foxrecon
+git clone https://github.com/f0xf0st3r/FoxRecon.git
+cd FoxRecon
 
 # Start the full stack
 docker compose up -d
