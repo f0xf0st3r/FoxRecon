@@ -1,0 +1,191 @@
+# FoxRecon - Production Docker Compose
+# Brings up the full stack: API, PostgreSQL, Redis, Celery workers
+
+services:
+  # --------------------------------------------------------------- #
+  # PostgreSQL - Primary database
+  # --------------------------------------------------------------- #
+  postgres:
+    image: postgres:16-alpine
+    container_name: foxrecon-postgres
+    environment:
+      POSTGRES_USER: foxrecon
+      POSTGRES_PASSWORD: foxrecon_secret
+      POSTGRES_DB: foxrecon
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foxrecon"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - foxrecon-network
+    restart: unless-stopped
+
+  # --------------------------------------------------------------- #
+  # Redis - Cache & Celery broker
+  # --------------------------------------------------------------- #
+  redis:
+    image: redis:7-alpine
+    container_name: foxrecon-redis
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - foxrecon-network
+    restart: unless-stopped
+
+  # --------------------------------------------------------------- #
+  # FoxRecon API Server
+  # --------------------------------------------------------------- #
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: foxrecon-api
+    command: python -m main
+    environment:
+      - APP_ENV=production
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=foxrecon
+      - POSTGRES_PASSWORD=foxrecon_secret
+      - POSTGRES_DB=foxrecon
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    ports:
+      - "8000:8000"
+    volumes:
+      - foxrecon_data:/tmp/foxrecon_data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - foxrecon-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # --------------------------------------------------------------- #
+  # Celery Worker - Scan execution
+  # --------------------------------------------------------------- #
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: foxrecon-worker
+    command: >
+      celery -A internal.workers.celery_app.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=scans,default
+      --max-tasks-per-child=100
+    environment:
+      - APP_ENV=production
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=foxrecon
+      - POSTGRES_PASSWORD=foxrecon_secret
+      - POSTGRES_DB=foxrecon
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    volumes:
+      - foxrecon_data:/tmp/foxrecon_data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - foxrecon-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  # --------------------------------------------------------------- #
+  # Celery Beat - Scheduled scans (optional)
+  # --------------------------------------------------------------- #
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: foxrecon-celery-beat
+    command: >
+      celery -A internal.workers.celery_app.celery_app beat
+      --loglevel=info
+      --scheduler=django_celery_beat.schedulers:DatabaseScheduler
+    environment:
+      - APP_ENV=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - foxrecon-network
+    restart: unless-stopped
+    profiles:
+      - scheduled
+
+  # --------------------------------------------------------------- #
+  # Flower - Celery monitoring (optional)
+  # --------------------------------------------------------------- #
+  flower:
+    image: mher/flower:2.0
+    container_name: foxrecon-flower
+    command: celery flower --broker=redis://redis:6379/0 --port=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    networks:
+      - foxrecon-network
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  foxrecon_data:
+    driver: local
+
+networks:
+  foxrecon-network:
+    driver: bridge
